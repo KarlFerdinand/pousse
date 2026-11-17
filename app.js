@@ -1,7 +1,7 @@
 /* Pousse : interface. Aucune dépendance, données uniquement sur l'appareil. */
 (function () {
   'use strict';
-  const { MOMENTS, EXTRA, FEELINGS, GROUPS, FOODS, AVOID_TEXT, ALERTS, WATER_GOAL } = window.DATA;
+  const { MOMENTS, EXTRA, FEELINGS, GROUPS, FOODS, AVOID_TEXT, ALERTS, WATER_GOAL, STOOLS, PAIN, ENERGY } = window.DATA;
   const L = window.LOGIC;
   const PREVIEW = !!window.POUSSE_PREVIEW || location.hash === '#demo';
   const $ = id => document.getElementById(id);
@@ -51,10 +51,12 @@
     keys: s => idb ? req(s, 'readonly', o => o.getAllKeys()) : Promise.resolve([...mem[s].keys()]),
   };
 
-  const S = { meals: [], settings: { modulen: false, modulenTarget: '', apiKey: '', model: 'claude-haiku-4-5' }, stock: {}, water: {}, hard: {}, fridge: null, basket: {}, active: null };
-  const KV = ['settings', 'stock', 'water', 'hard', 'fridge', 'basket', 'active'];
+  const S = { meals: [], settings: { apiKey: '', model: 'claude-haiku-4-5' }, stock: {}, water: {}, hard: {}, gut: {}, fridge: null, basket: {}, active: null };
+  const KV = ['settings', 'stock', 'water', 'hard', 'gut', 'fridge', 'basket', 'active'];
   const save = k => db.put('kv', k, S[k]).catch(() => toast("Enregistrement impossible. Vérifie l'espace disponible."));
-  let tab = 'today', sheet = null, F = null, lastPop = null, tick = null, deleting = false;
+  let tab = 'today', sheet = null, F = null, lastPop = null, tick = null, deleting = false, check = null;
+  const points = () => L.totalPoints(S.meals, S.water, S.gut);
+  const gutOf = d => S.gut[d] || (S.gut[d] = {});
 
   function today() { return L.dayKey(new Date()); }
 
@@ -114,21 +116,20 @@
     const day = today(), done = L.firstByMoment(S.meals, day);
     const flags = MOMENTS.map(m => !!done[m.id]);
     const n = flags.filter(Boolean).length;
-    const pts = L.totalPoints(S.meals, S.water), lvl = L.level(pts), st = L.streak(S.meals, S.hard, new Date());
+    const pts = points(), lvl = L.level(pts), st = L.streak(S.meals, S.hard, new Date());
     const cur = L.currentMoment(done, new Date());
     const msg = n === 5 ? 'Journée complète, ta plante a fleuri.' : n === 0 ? 'Chaque repas noté ajoute une feuille.' : n === 4 ? 'Plus qu’une feuille pour la fleur.' : 'Ta plante grandit, continue à ton rythme.';
     const water = S.water[day] || 0;
     const dayMeals = S.meals.filter(m => m.day === day);
     const peu = dayMeals.filter(m => m.qty === 'peu').length;
     const extra = dayMeals.filter(m => m.moment === EXTRA.id).sort((a, b) => a.ts - b.ts);
-    const modCount = dayMeals.filter(m => m.modulen).length;
     const date = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
 
     const rows = MOMENTS.map(m => {
       const meal = done[m.id];
-      const hint = S.settings.modulen && m.modulen ? 'Modulen' : m.hint;
+      const hint = m.hint;
       if (meal) {
-        const sub = [fmtTime(meal.ts), meal.duration ? fmtDur(meal.duration) : '', meal.text || (meal.modulen ? 'Modulen' : '')].filter(Boolean).join(' · ');
+        const sub = [fmtTime(meal.ts), meal.duration ? fmtDur(meal.duration) : '', meal.text].filter(Boolean).join(' · ');
         return `<button class="moment done" data-act="meal" data-v="${meal.id}"><span class="mark">${icon('check')}</span><span class="txt"><b>${esc(m.label)}</b><span>${esc(sub)}</span></span>${meal.thumb ? `<img class="thumb" src="${meal.thumb}" alt="">` : ''}</button>`;
       }
       return `<button class="moment ${cur && cur.id === m.id ? 'now' : ''}" data-act="add" data-v="${m.id}"><span class="mark">${icon('plus')}</span><span class="txt"><b>${esc(m.label)}</b><span>${esc(hint)}</span></span><span class="hour">${m.h.replace(':', ' h ')}</span></button>`;
@@ -155,12 +156,31 @@
       ${timer}
       <section class="stack" aria-label="Moments du jour">${rows}</section>
       ${extra.length ? `<section class="stack"><h2>Hors repas</h2>${extra.map(journalRow).join('')}</section>` : ''}
-      ${S.settings.modulen ? `<p class="banner"><b>Modulen</b> : ${modCount}${S.settings.modulenTarget ? ` sur ${esc(S.settings.modulenTarget)}` : ''} portion${modCount > 1 ? 's' : ''} aujourd'hui${S.settings.modulenTarget ? '' : '. Indique ta prescription dans les réglages'}.</p>` : ''}
+      ${gutCard(day)}
       ${peu >= 2 ? `<p class="note">Tu as noté plusieurs petites prises aujourd'hui. Si ça dure, parles-en à ton équipe de soin.</p>` : ''}
       <section class="stack"><h2>Eau : ${water} verre${water > 1 ? 's' : ''} sur ${WATER_GOAL}</h2>
         <div class="water">${[...Array(WATER_GOAL)].map((_, i) => `<button class="glass ${i < water ? 'on' : ''}" data-act="water" data-v="${i + 1}" aria-label="${i + 1} verres"></button>`).join('')}</div>
         <p class="sub">À température ambiante ou tiède.</p></section>
       <button class="linkbtn" data-act="hard">${S.hard[day] ? "Journée difficile notée, ta série est protégée. Annuler" : 'Journée difficile ? Protège ta série'}</button>`;
+  }
+
+  function gutCard(day) {
+    const g = S.gut[day] || {};
+    const seg = (act, labels, val) => `<div class="seg" role="group">${labels.map((l, i) => `<button data-act="${act}" data-v="${i}" class="${val === i ? 'on' : ''}" aria-pressed="${val === i}">${esc(l)}</button>`).join('')}</div>`;
+    return `<section class="gutcard" aria-label="Mon ventre aujourd'hui">
+        <div class="gutrow"><h2>Mon ventre aujourd'hui</h2>${L.gutNoted(g) ? '<span class="sub">Noté</span>' : '<span class="sub">+5 points</span>'}</div>
+        <div class="gutrow"><span class="label">Selles</span><div class="counter">
+          <button class="iconbtn" data-act="gutStool" data-v="-1" aria-label="Une selle de moins">−</button>
+          <b aria-live="polite">${g.stools != null ? g.stools : '–'}</b>
+          <button class="iconbtn" data-act="gutStool" data-v="1" aria-label="Une selle de plus">${icon('plus')}</button></div></div>
+        <div class="chips">${STOOLS.map(x => `<button class="chip ${g.type === x.id ? 'on' : ''}" data-act="gutType" data-v="${x.id}" aria-pressed="${g.type === x.id}">${esc(x.label)}</button>`).join('')}
+          <button class="chip ${g.night ? 'on' : ''}" data-act="gutFlag" data-v="night" aria-pressed="${!!g.night}">La nuit</button>
+          <button class="chip ${g.blood ? 'on alert' : ''}" data-act="gutFlag" data-v="blood" aria-pressed="${!!g.blood}">Sang</button></div>
+        ${g.blood ? `<p class="alertcard"><b>Du sang dans les selles : appelle ton gastro aujourd'hui.</b> En cas de fièvre, de fortes douleurs ou de vertiges, va aux urgences.</p>` : ''}
+        <div class="field"><span class="label">Douleur</span>${seg('gutPain', PAIN, g.pain)}</div>
+        <div class="field"><span class="label">Énergie</span>${seg('gutEnergy', ENERGY, g.energy)}</div>
+        <input type="text" id="gutNote" value="${esc(g.note || '')}" placeholder="Remarque pour ton gastro" autocomplete="off">
+      </section>`;
   }
 
   function stockLabel(s) { return { ok: "J'en ai", low: 'Presque fini', out: 'À acheter' }[s]; }
@@ -184,6 +204,7 @@
       <section class="stack"><h2>Repas possibles</h2>
         ${ideas.meals.length ? ideas.meals.map(c => `<div class="mealidea">${c.map(x => `${x.e} ${esc(x.name)}`).join(' + ')}</div>`).join('') : `<p class="note">Il manque ${ideas.missing.join(', ')} pour composer un repas. Ajoute-les à tes courses.</p>`}
       </section>
+      ${(() => { const rs = L.recipesFor(S.stock); return rs.length ? `<section class="stack"><h2>Recettes faisables</h2>${rs.map(r => `<details><summary>${esc(r.name)}</summary><ol>${r.steps.map(x => `<li>${esc(x)}</li>`).join('')}</ol></details>`).join('')}</section>` : ''; })()}
       <section class="stack">${groups}</section>`;
   }
 
@@ -193,13 +214,33 @@
     const left = items.filter(i => !i.inBasket).length;
     const rayons = Object.keys(g).map(r => `<section class="stack"><h2>${esc(r)}</h2>${g[r].map(i => `<button class="shop ${i.inBasket ? 'done' : ''}" data-act="buy" data-v="${i.food.id}">
       <span class="box">${i.inBasket ? icon('check') : ''}</span><span class="e">${i.food.e}</span>
-      <span class="t"><b>${esc(i.food.name)}</b><span>${i.low ? 'Presque fini · ' : ''}${esc(i.food.qty)}</span></span></button>`).join('')}</section>`).join('');
+      <span class="t"><b>${esc(i.food.name)}</b><span>${[i.low ? 'Presque fini' : '', i.food.tip].filter(Boolean).map(esc).join(' · ')}</span></span></button>`).join('')}</section>`).join('');
     return `${previewBanner()}<header class="top"><div><small>Selon ton frigo et tes repas notés</small><h1>Courses</h1></div></header>
       <p class="big-line"><b>${left}</b> produit${left > 1 ? 's' : ''} à acheter</p>
       ${left ? `<button class="btn ghost small" data-act="shareList">Partager la liste</button>` : ''}
       ${rayons || `<p class="note">Rien à acheter pour l'instant.</p>`}
       ${Object.keys(S.basket).length ? `<button class="btn ghost small" data-act="clearBasket">Courses terminées</button>` : ''}
-      ${S.settings.modulen ? `<p class="sub">Modulen sur prescription. Les quantités des petits-déjeuners et collations diminuent.</p>` : ''}`;
+      ${productBox()}`;
+  }
+
+  function productBox() {
+    const scan = ('BarcodeDetector' in window) || !!S.settings.apiKey;
+    let res = '';
+    if (check && check.loading) res = '<p class="sub">Recherche du produit…</p>';
+    else if (check && check.error) res = `<p class="note">${esc(check.error)}</p>`;
+    else if (check && check.r) {
+      const r = check.r;
+      const items = [...r.additives, ...r.allergens.map(a => `Contient : ${a}`), ...(r.ultra ? ['Produit ultra-transformé'] : [])];
+      res = `<div class="product ${r.calm ? 'calm' : 'warn'}"><b>${esc(r.name)}</b>${r.brand ? `<span class="sub">${esc(r.brand)}</span>` : ''}
+        ${r.calm ? `<p>Aucun additif irritant ni gluten ou lait repéré dans la fiche.</p>` : `<p>Peut irriter l'intestin en ce moment :</p><ul>${items.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`}
+        <p class="sub">Source : Open Food Facts, fiche remplie par des contributeurs. Vérifie l'étiquette en cas de doute.</p></div>`;
+    }
+    return `<section class="stack" id="produit"><h2>Vérifier un produit</h2>
+      <p class="sub">Les émulsifiants et épaississants des produits industriels irritent souvent l'intestin. Tape les chiffres sous le code-barres${scan ? ' ou prends-le en photo' : ''}.</p>
+      <div class="row2"><input type="text" id="ean" inputmode="numeric" autocomplete="off" placeholder="Ex. 3017620422003" value="${esc(check && check.code || '')}">
+        <button class="btn primary small" data-act="checkProduct">Vérifier</button></div>
+      ${scan ? `<label class="btn ghost small"><input class="vh" type="file" accept="image/*" id="barcodeIn">${icon('camera').replace('<svg', '<svg width="22" height="22"')}Photo du code-barres</label>` : ''}
+      ${res}</section>`;
   }
 
   function journalRow(m) {
@@ -217,12 +258,13 @@
     return [
       ['Première photo', m.some(x => x.thumb)], ['Journée complète', best >= 5], ['3 jours d’affilée', st >= 3], ['7 jours d’affilée', st >= 7],
       ['Eau du jour', Object.values(S.water).some(n => n >= WATER_GOAL)], ['Frigo à jour', !!S.fridge],
+      ['Ventre noté 7 jours', Object.values(S.gut).filter(L.gutNoted).length >= 7],
       ['10 assiettes complètes', m.filter(x => L.isComplete(x.foods || [])).length >= 10], ['10 repas chronométrés', m.filter(x => x.duration > 0).length >= 10],
     ];
   }
 
   function viewProgres() {
-    const pts = L.totalPoints(S.meals, S.water), lvl = L.level(pts), st = L.streak(S.meals, S.hard, new Date());
+    const pts = points(), lvl = L.level(pts), st = L.streak(S.meals, S.hard, new Date());
     const first = new Date(); first.setHours(0, 0, 0, 0); first.setDate(first.getDate() - 6);
     const days = [...Array(7)].map((_, i) => L.addDays(first, i));
     const td = today();
@@ -245,6 +287,12 @@
       return `<div class="tile"><div class="v">${c}</div><div class="l">prises avec ${GROUPS[g].toLowerCase()}</div></div>`;
     }).join('');
     const journal = [...S.meals].sort((a, b) => b.ts - a.ts).slice(0, 20).map(journalRow).join('');
+    const maxSt = Math.max(4, ...days.map(d => (S.gut[L.dayKey(d)] || {}).stools || 0));
+    const gutBars = days.map(d => {
+      const g = S.gut[L.dayKey(d)] || {};
+      const h = g.stools != null ? Math.max(4, Math.round(100 * g.stools / maxSt)) : 0;
+      return `<div class="gbar"><span class="gv">${g.stools != null ? g.stools : ''}</span><div class="gtrack"><i class="${g.type || ''}" style="height:${h}%"></i></div>${g.blood ? '<span class="gblood" title="Sang">●</span>' : ''}<span class="d">${JOURS[d.getDay()]}</span></div>`;
+    }).join('');
     const bs = badges(pts, st);
     return `${previewBanner()}<header class="top"><div><small>${pts} points</small><h1>Progrès</h1></div></header>
       <section class="levelcard"><div class="name">${esc(lvl.name)}</div><div class="bar"><i style="width:${lvl.pct}%"></i></div>
@@ -257,6 +305,11 @@
           <div class="legend"><span><i></i>Repas</span><span><i class="hors"></i>Hors repas</span></div></div>
         ${feels ? `<p class="banner"><b>Ressentis avant de manger</b> : ${esc(feels)}</p>` : ''}
         <p class="sub">Observe sans te juger. Aucune durée n'est imposée.</p></section>
+      <section class="stack"><h2>Mon ventre sur 7 jours</h2>
+        <div class="gutchart" aria-label="Nombre de selles par jour">${gutBars}</div>
+        <div class="legend">${STOOLS.map(x => `<span><i class="${x.id}"></i>${esc(x.label)}</span>`).join('')}</div>
+        <button class="btn primary" data-act="report">Bilan pour mon rendez-vous</button>
+        <p class="sub">Un résumé des 14 derniers jours à envoyer ou montrer à ton gastro ou à ton équipe de soin.</p></section>
       <section class="stack"><h2>Produits sur 7 jours</h2><div class="tiles">${counts}</div></section>
       <section class="stack"><h2>Récompenses</h2><div class="badges">${bs.map(([t, on]) => `<div class="badge ${on ? 'on' : ''}">${esc(t)}</div>`).join('')}</div></section>
       <section class="stack"><h2>Journal</h2>${journal || '<p class="note">Tes repas apparaîtront ici avec leur heure, leur durée et ta note.</p>'}</section>`;
@@ -270,7 +323,7 @@
     const m = getMoment(id);
     const now = new Date();
     return Object.assign({ moment: id, photo: null, thumb: null, text: '', qty: 'normal', time: hhmm(now), duration: '', feel: null, note: '',
-      picked: [], removed: [], foods: [], avoid: [], modulen: !!(S.settings.modulen && m.modulen), start: null }, extra || {});
+      picked: [], removed: [], foods: [], avoid: [], start: null, reading: false }, extra || {});
   }
 
   function computeFoods() {
@@ -283,14 +336,14 @@
     const d = new Date(); const [h, mi] = F.time.split(':').map(Number); d.setHours(h, mi, 0, 0);
     const already = L.firstByMoment(S.meals, today())[F.moment];
     if (already) return 0;
-    return L.mealPoints({ moment: F.moment, ts: d.getTime(), thumb: F.thumb, text: F.text, foods: F.foods, modulen: F.modulen, duration: +F.duration });
+    return L.mealPoints({ moment: F.moment, ts: d.getTime(), thumb: F.thumb, text: F.text, foods: F.foods, duration: +F.duration });
   }
 
   function dynHtml() {
     const m = getMoment(F.moment), p = L.plateParts(F.foods);
-    const foods = F.modulen ? '' : Object.keys(GROUPS).filter(g => g !== 'autre').map(g => `<div class="chiptitle">${GROUPS[g]}</div><div class="chips">${FOODS.filter(x => x.group === g).map(x => `<button class="chip ${F.foods.includes(x.id) ? 'on' : ''}" data-act="food" data-v="${x.id}" aria-pressed="${F.foods.includes(x.id)}">${x.e} ${esc(x.name)}</button>`).join('')}</div>`).join('');
-    const plate = !F.modulen && m.full ? `<div class="plate"><span class="${p.base ? 'on' : ''}">Féculent</span><span class="${p.legume ? 'on' : ''}">Légume</span><span class="${p.proteine ? 'on' : ''}">Protéine</span></div>` : '';
-    const avoid = F.avoid.length ? `<p class="note">Sur ta liste à éviter : ${esc(F.avoid.join(', '))}. C'est noté, sans perdre de points.</p>` : '';
+    const foods = Object.keys(GROUPS).filter(g => g !== 'autre').map(g => `<div class="chiptitle">${GROUPS[g]}</div><div class="chips">${FOODS.filter(x => x.group === g).map(x => `<button class="chip ${F.foods.includes(x.id) ? 'on' : ''}" data-act="food" data-v="${x.id}" aria-pressed="${F.foods.includes(x.id)}">${x.e} ${esc(x.name)}</button>`).join('')}</div>`).join('');
+    const plate = m.full ? `<div class="plate"><span class="${p.base ? 'on' : ''}">Féculent</span><span class="${p.legume ? 'on' : ''}">Légume</span><span class="${p.proteine ? 'on' : ''}">Protéine</span></div>` : '';
+    const avoid = F.avoid.length ? `<p class="banner">Pour ton suivi digestif : ${esc(F.avoid.join(', '))}. Ça irrite parfois l'intestin, observe simplement comment ton ventre réagit. Aucun point en moins.</p>` : '';
     const pts = previewPoints();
     return { foods: foods + plate + avoid, save: pts ? `Enregistrer · +${pts} points` : 'Enregistrer' };
   }
@@ -305,18 +358,18 @@
     const m = getMoment(F.moment), all = [...MOMENTS, EXTRA];
     computeFoods();
     const d = dynHtml();
-    const modAvail = S.settings.modulen && m.modulen;
+    const favs = L.favorites(S.meals, new Date());
     return `<div class="top"><h1>${esc(m.label)}</h1><button class="iconbtn" data-act="close" aria-label="Fermer">${icon('close')}</button></div>
       <div class="seg" role="group" aria-label="Moment">${all.map(x => `<button data-act="moment" data-v="${x.id}" class="${x.id === F.moment ? 'on' : ''}" aria-pressed="${x.id === F.moment}">${esc(x.short)}</button>`).join('')}</div>
-      ${modAvail ? `<div class="seg" role="group" aria-label="Type de prise"><button data-act="mod" data-v="1" class="${F.modulen ? 'on' : ''}">Modulen</button><button data-act="mod" data-v="0" class="${F.modulen ? '' : 'on'}">Repas</button></div>` : ''}
-      ${F.modulen ? `<details open><summary>Bien prendre Modulen</summary><ul><li>1 portion = 50 g de poudre (6 mesurettes rases) + 210 ml d'eau</li><li>À température ambiante</li><li>À petites gorgées, sur 20 à 30 minutes</li><li>Prépare-la juste avant, ou garde-la 24 h maximum au frigo</li></ul></details>` : `
+      ${favs.length ? `<div class="field"><span class="label">Repas habituels</span><div class="chips">${favs.map((f, i) => `<button class="chip" data-act="fav" data-v="${i}">${esc(f.text)}</button>`).join('')}</div></div>` : ''}
       <label class="photo ${F.photo ? 'filled' : ''}"><input class="vh" type="file" accept="image/*" id="photoIn">
-        ${F.photo ? `<img src="${F.photo}" alt="Ton plat">` : `<div style="text-align:center">${icon('camera')}<div>Photo du plat</div></div>`}</label>`}
+        ${F.photo ? `<img src="${F.photo}" alt="Ton plat">` : `<div style="text-align:center">${icon('camera')}<div>Photo du plat</div></div>`}</label>
+      ${F.reading ? '<p class="sub">Lecture de la photo…</p>' : F.photo && S.settings.apiKey ? '<p class="sub">Produits reconnus cochés ci-dessous, vérifie-les.</p>' : ''}
       <div class="row2">
         <div class="field"><label class="label" for="fTime">Début</label><input type="time" id="fTime" value="${esc(F.time)}"></div>
         <div class="field"><label class="label" for="fDur">Durée (minutes)</label><input type="number" inputmode="numeric" min="0" max="240" id="fDur" value="${esc(F.duration)}" placeholder="Facultatif"></div>
       </div>
-      ${F.modulen ? '' : `<div class="field"><label class="label" for="fText">En quelques mots</label><input type="text" id="fText" value="${esc(F.text)}" placeholder="Ex. riz, carotte et poulet" autocomplete="off"></div>
+      ${`<div class="field"><label class="label" for="fText">En quelques mots</label><input type="text" id="fText" value="${esc(F.text)}" placeholder="Ex. riz, carotte et poulet" autocomplete="off"></div>
       <div class="field"><span class="label">Quantité</span><div class="seg" role="group" aria-label="Quantité">${[['peu', 'Petite'], ['normal', 'Normale'], ['bien', 'Grande']].map(([k, l]) => `<button data-act="qty" data-v="${k}" class="${F.qty === k ? 'on' : ''}" aria-pressed="${F.qty === k}">${l}</button>`).join('')}</div></div>`}
       <div class="field"><span class="label">Avant de manger, je ressentais</span><div class="chips">${FEELINGS.map(x => `<button class="chip ${F.feel === x.id ? 'on' : ''}" data-act="feel" data-v="${x.id}" aria-pressed="${F.feel === x.id}">${esc(x.label)}</button>`).join('')}</div></div>
       <div class="field" id="dyn">${d.foods}</div>
@@ -332,7 +385,7 @@
     return `<div class="top"><h1>${esc(mo.label)}</h1><button class="iconbtn" data-act="close" aria-label="Fermer">${icon('close')}</button></div>
       <img class="detailimg" id="detailPhoto" src="${m.thumb || ''}" alt="" ${m.thumb ? '' : 'hidden'}>
       <div class="kv"><div><b>Quand</b> : ${JOURS[d.getDay()]} ${d.getDate()} à ${fmtTime(m.ts)}</div><div><b>Durée</b> : ${fmtDur(m.duration)}</div>
-        ${m.modulen ? '<div><b>Modulen</b></div>' : `<div><b>Quantité</b> : ${esc(qty)}</div>`}
+        ${qty ? `<div><b>Quantité</b> : ${esc(qty)}</div>` : ''}
         ${feel ? `<div><b>Ressenti</b> : ${esc(feel)}</div>` : ''}${m.text ? `<div><b>Description</b> : ${esc(m.text)}</div>` : ''}${names ? `<div><b>Produits</b> : ${esc(names)}</div>` : ''}</div>
       <div class="field"><label class="label" for="detailNote">Note libre</label><textarea id="detailNote" data-id="${m.id}" placeholder="Ajoute ce que tu veux retenir">${esc(m.note)}</textarea></div>
       ${deleting ? `<p class="note">Supprimer définitivement ce repas ?</p><div class="row2"><button class="btn ghost small" data-act="noDelete">Garder</button><button class="btn danger small" data-act="delete" data-v="${m.id}">Supprimer</button></div>` : `<button class="btn danger small" data-act="askDelete">Supprimer ce repas</button>`}`;
@@ -344,20 +397,25 @@
     const ics = standalone ? `x-safari-${new URL('rappels.ics', location.href).href}` : 'rappels.ics';
     return `<div class="top"><h1>Réglages et rappels</h1><button class="iconbtn" data-act="close" aria-label="Fermer">${icon('close')}</button></div>
       <section class="alertcard"><h3>Appelle ton gastro ou va aux urgences en cas de</h3><ul>${ALERTS.map(a => `<li>${esc(a)}</li>`).join('')}</ul></section>
-      <details><summary>À éviter</summary><ul>${AVOID_TEXT.map(a => `<li>${esc(a)}</li>`).join('')}</ul></details>
+      <details><summary>Ce qui irrite souvent l'intestin en poussée</summary><ul>${AVOID_TEXT.map(a => `<li>${esc(a)}</li>`).join('')}</ul><p class="sub" style="margin-top:8px">Des repères, pas des interdits. Pousse ne compte ni calories ni quantités.</p></details>
       <section class="stack"><h2>Rappels des repas</h2>
         <p class="sub">Une notification à chaque moment, et le dimanche pour le frigo et les courses, via le Calendrier de l'iPhone.</p>
         ${PREVIEW ? '<p class="note">Disponible une fois l’appli installée.</p>' : `<a class="btn ghost small" style="color:inherit;text-decoration:none" href="${esc(ics)}">Ajouter les rappels au Calendrier</a>`}</section>
-      <section class="stack"><h2>Modulen</h2>
-        <label class="switch">Modulen m'a été prescrit<input type="checkbox" id="setMod" ${s.modulen ? 'checked' : ''}></label>
-        ${s.modulen ? `<div class="field"><label class="label" for="setTarget">Portions par jour selon ta prescription</label><input type="number" inputmode="numeric" min="0" id="setTarget" value="${esc(s.modulenTarget)}" placeholder="Celui prescrit par ton médecin ou ta diététicienne"></div>` : ''}</section>
-      ${PREVIEW ? '' : `<details><summary>Lecture automatique du frigo (facultatif)</summary>
-        <p class="sub" style="margin-top:8px">Avec une clé Anthropic personnelle, la photo du frigo est envoyée à Anthropic pour cocher les produits visibles. Sans clé, rien ne quitte ton téléphone. Chaque analyse est facturée sur ton compte.</p>
+      ${PREVIEW ? '' : `<details><summary>Lecture automatique des photos (facultatif)</summary>
+        <p class="sub" style="margin-top:8px">Avec une clé Anthropic personnelle, les photos du plat, du frigo et des codes-barres sont envoyées à Anthropic pour cocher les produits reconnus. Jamais de calories. Sans clé, aucune photo ne quitte ton téléphone. Chaque analyse est facturée sur ton compte.</p>
         <div class="field" style="margin-top:8px"><label class="label" for="setKey">Clé API</label><input type="password" id="setKey" autocomplete="off" value="${esc(s.apiKey)}" placeholder="sk-ant-…"></div>
         <div class="field" style="margin-top:8px"><label class="label" for="setModel">Modèle</label><input type="text" id="setModel" autocomplete="off" value="${esc(s.model)}"></div></details>
       <section class="stack"><h2>Sauvegarde</h2><p class="sub">Tes données restent sur cet iPhone. Exporte-les de temps en temps.</p>
         <div class="row2"><button class="btn ghost small" data-act="export">Exporter</button><label class="btn ghost small"><input class="vh" type="file" accept="application/json,.json" id="importIn">Importer</label></div></section>`}
       <p class="sub">Pousse est open source (licence MIT). Ce suivi ne remplace pas l'avis de ton gastro-entérologue ou d'un diététicien.</p>`;
+  }
+
+  function sheetReport() {
+    const text = L.report(S.meals, S.gut, S.water, new Date(), 14);
+    return `<div class="top"><h1>Bilan</h1><button class="iconbtn" data-act="close" aria-label="Fermer">${icon('close')}</button></div>
+      <p class="sub">À envoyer ou montrer à ton gastro, aux HUS ou à ton équipe de soin. Que des faits notés, sans note ni objectif.</p>
+      <pre class="report">${esc(text)}</pre>
+      <div class="row2"><button class="btn primary small" data-act="shareReport">Partager</button><button class="btn ghost small" data-act="copyReport">Copier</button></div>`;
   }
 
   function openSheet(kind, arg) {
@@ -370,7 +428,7 @@
   }
   function drawSheet() {
     const top = $('sheet').scrollTop;
-    const html = sheet.kind === 'add' ? sheetAdd() : sheet.kind === 'settings' ? sheetSettings() : sheetMeal(sheet.arg);
+    const html = sheet.kind === 'add' ? sheetAdd() : sheet.kind === 'settings' ? sheetSettings() : sheet.kind === 'report' ? sheetReport() : sheetMeal(sheet.arg);
     $('sheet').innerHTML = `<div class="sheetin">${html}</div>`;
     $('sheet').scrollTop = top;
     if (sheet.kind === 'meal' && sheet.arg.thumb) db.get('photos', sheet.arg.id).then(p => { if (p && $('detailPhoto')) $('detailPhoto').src = p; });
@@ -387,7 +445,7 @@
     const moment = getMoment(F.moment);
     const already = L.firstByMoment(S.meals, L.dayKey(base))[F.moment];
     const meal = { id: uid(), day: L.dayKey(base), moment: F.moment, ts: base.getTime(), duration: Math.max(0, Math.round(+F.duration || 0)) || null,
-      qty: F.modulen ? null : F.qty, text: F.modulen ? '' : F.text.trim(), note: F.note.trim(), feel: F.feel, foods: F.modulen ? [] : F.foods, thumb: F.modulen ? null : F.thumb, modulen: F.modulen };
+      qty: F.qty, text: F.text.trim(), note: F.note.trim(), feel: F.feel, foods: F.foods, thumb: F.thumb };
     S.meals.push(meal);
     await db.put('meals', meal.id, meal);
     if (meal.thumb && F.photo) await db.put('photos', meal.id, F.photo);
@@ -402,19 +460,66 @@
     toast(pts ? (idx >= 0 && n === 5 ? `+${pts} points. Journée complète, ta plante fleurit.` : `+${pts} points · ${idx >= 0 ? `${n} sur 5` : 'Noté, sans jugement'}`) : `${moment.label} ajouté au journal`);
   }
 
+  async function askClaude(photo, prompt) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': S.settings.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: S.settings.model, max_tokens: 300, messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: photo.split(',')[1] } },
+        { type: 'text', text: prompt }] }] }),
+    });
+    if (!r.ok) throw new Error(String(r.status));
+    const j = await r.json();
+    return (j.content || []).map(c => c.text || '').join('');
+  }
+
+  // Photo du plat : coche les produits reconnus, comme la saisie photo des applis de nutrition, sans calories
+  async function analysePlate() {
+    const form = F;
+    form.reading = true; drawSheet();
+    try {
+      const res = L.parsePlate(await askClaude(form.photo, L.buildPlatePrompt()));
+      if (F !== form) return;
+      res.foods.forEach(id => { if (!form.picked.includes(id)) form.picked.push(id); });
+      if (!form.text.trim() && res.description) form.text = res.description;
+      if (!res.foods.length) toast('Rien de reconnu. Coche les produits toi-même.');
+    } catch (e) { toast('Lecture impossible. Coche les produits toi-même.'); }
+    if (F === form) { form.reading = false; drawSheet(); refreshDyn(); }
+  }
+
+  async function lookupProduct(code) {
+    code = String(code || '').replace(/\D/g, '');
+    if (code.length < 8) { check = { code, error: 'Le code-barres compte 8 à 13 chiffres.' }; render(); return; }
+    check = { code, loading: true }; render();
+    try {
+      const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json?fields=product_name,product_name_fr,brands,additives_tags,allergens_tags,nova_group`);
+      const j = await r.json();
+      check = j.status === 1 ? { code, r: L.productCheck(j.product) } : { code, error: "Produit introuvable sur Open Food Facts. Lis la liste d'ingrédients : les codes E433, E466 et E407 sont les plus souvent déconseillés." };
+    } catch (e) { check = { code, error: 'Recherche impossible sans connexion.' }; }
+    if (tab === 'courses') { render(); const el = $('produit'); if (el) el.scrollIntoView({ block: 'start' }); }
+  }
+
+  async function readBarcode(file, photo) {
+    try {
+      if ('BarcodeDetector' in window) {
+        const det = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e'] });
+        const codes = await det.detect(await createImageBitmap(file));
+        if (codes.length) return lookupProduct(codes[0].rawValue);
+      }
+      if (S.settings.apiKey && !PREVIEW) {
+        toast('Lecture du code-barres…');
+        const txt = await askClaude(photo, 'Lis les chiffres du code-barres sur cette photo. Réponds seulement avec les chiffres.');
+        const code = (txt.match(/\d{8,14}/) || [])[0];
+        if (code) return lookupProduct(code);
+      }
+      toast('Code-barres illisible. Tape les chiffres.');
+    } catch (e) { toast('Code-barres illisible. Tape les chiffres.'); }
+  }
+
   async function analyseFridge(photo) {
     toast('Lecture de la photo…');
     try {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': S.settings.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-        body: JSON.stringify({ model: S.settings.model, max_tokens: 300, messages: [{ role: 'user', content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: photo.split(',')[1] } },
-          { type: 'text', text: L.buildVisionPrompt() }] }] }),
-      });
-      if (!r.ok) throw new Error(String(r.status));
-      const j = await r.json();
-      const found = L.parseVision((j.content || []).map(c => c.text || '').join(''));
+      const found = L.parseVision(await askClaude(photo, L.buildVisionPrompt()));
       found.forEach(id => L.setStock(S.stock, id, 'ok'));
       save('stock'); render();
       toast(found.length ? `${found.length} produits reconnus. Vérifie la liste.` : 'Aucun produit reconnu. Coche-les toi-même.');
@@ -467,8 +572,21 @@
         L.useFoods(S.stock, m.foods || [], -1); save('stock');
         closeSheet(); render(); toast('Repas supprimé'); break;
       }
-      case 'moment': { F.moment = v; F.modulen = !!(S.settings.modulen && getMoment(v).modulen); drawSheet(); break; }
-      case 'mod': F.modulen = v === '1'; drawSheet(); break;
+      case 'moment': F.moment = v; drawSheet(); break;
+      case 'fav': { const f = L.favorites(S.meals, new Date())[+v]; if (f) { F.text = f.text; F.picked = [...f.foods]; F.removed = []; drawSheet(); refreshDyn(); } break; }
+      case 'gutStool': { const g = gutOf(today()); g.stools = Math.max(0, (g.stools != null ? g.stools : (+v > 0 ? 0 : 1)) + +v); save('gut'); render(); break; }
+      case 'gutType': { const g = gutOf(today()); g.type = g.type === v ? null : v; save('gut'); render(); break; }
+      case 'gutFlag': { const g = gutOf(today()); g[v] = !g[v]; save('gut'); render(); break; }
+      case 'gutPain': { const g = gutOf(today()); g.pain = g.pain === +v ? null : +v; save('gut'); render(); break; }
+      case 'gutEnergy': { const g = gutOf(today()); g.energy = g.energy === +v ? null : +v; save('gut'); render(); break; }
+      case 'report': openSheet('report'); break;
+      case 'shareReport': case 'copyReport': {
+        const text = L.report(S.meals, S.gut, S.water, new Date(), 14);
+        if (b.dataset.act === 'shareReport' && navigator.share) { try { await navigator.share({ title: 'Bilan Pousse', text }); break; } catch (err) { if (err.name === 'AbortError') break; } }
+        try { await navigator.clipboard.writeText(text); toast('Bilan copié'); } catch (e2) { toast('Copie impossible ici. Sélectionne le texte.'); }
+        break;
+      }
+      case 'checkProduct': lookupProduct(($('ean') || {}).value); break;
       case 'qty': F.qty = v; drawSheet(); break;
       case 'feel': F.feel = F.feel === v ? null : v; drawSheet(); break;
       case 'food':
@@ -518,17 +636,17 @@
     }
     else if (t.id === 'setKey') { S.settings.apiKey = t.value.trim(); save('settings'); }
     else if (t.id === 'setModel') { S.settings.model = t.value.trim(); save('settings'); }
-    else if (t.id === 'setTarget') { S.settings.modulenTarget = t.value; save('settings'); }
+    else if (t.id === 'gutNote') { gutOf(today()).note = t.value; save('gut'); }
   });
 
   document.addEventListener('change', async e => {
     const t = e.target, file = t.files && t.files[0];
-    if (t.id === 'setMod') { S.settings.modulen = t.checked; save('settings'); drawSheet(); return; }
     if (!file) return;
     if (t.id === 'importIn') return importData(file);
     try {
       const [photo, thumb] = await toPhoto(file);
-      if (t.id === 'photoIn' && F) { F.photo = photo; F.thumb = thumb; drawSheet(); refreshDyn(); }
+      if (t.id === 'photoIn' && F) { F.photo = photo; F.thumb = thumb; drawSheet(); refreshDyn(); if (S.settings.apiKey && !PREVIEW) analysePlate(); }
+      else if (t.id === 'barcodeIn') readBarcode(file, photo);
       else if (t.id === 'activePhoto' && S.active) { S.active.photo = photo; S.active.thumb = thumb; save('active'); render(); startClock(); }
       else if (t.id === 'fridgeIn') {
         S.fridge = { ts: Date.now(), photo }; save('fridge'); render();
@@ -536,6 +654,8 @@
       }
     } catch (err) { toast("Cette photo n'a pas pu être lue. Essaie avec une autre."); }
   });
+
+  document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'ean') lookupProduct(e.target.value); });
 
   function startClock() {
     clearInterval(tick);
@@ -563,7 +683,7 @@
     const add = (dayOffset, moment, h, m, duration, text, foods, e, extra) => {
       const d = L.addDays(now, dayOffset); d.setHours(h, m, 0, 0);
       if (d.getTime() > now.getTime()) return;
-      S.meals.push(Object.assign({ id: uid(), day: L.dayKey(d), moment, ts: d.getTime(), duration, qty: 'normal', text, note: '', feel: null, foods, thumb: e ? fakePlate(e) : null, modulen: false }, extra || {}));
+      S.meals.push(Object.assign({ id: uid(), day: L.dayKey(d), moment, ts: d.getTime(), duration, qty: 'normal', text, note: '', feel: null, foods, thumb: e ? fakePlate(e) : null }, extra || {}));
     };
     for (let i = -7; i <= 0; i++) {
       add(i, 'pdj', 8, 5 + (i & 3) * 5, 6 + (-i % 3), 'Œufs durs et galettes', ['oeuf', 'galette'], '🥚');
@@ -573,7 +693,12 @@
       add(i, 'din', 19, 45, 10 + (-i % 4) * 3, 'Pommes de terre, courgette, cabillaud', ['pdt', 'courgette', 'poisson'], '🐟');
       if (i === -2 || i === -5) add(i, EXTRA.id, 22, 30, 5, 'Galettes de riz', ['galette'], null, { feel: 'ennui' });
     }
+    for (let i = -7; i <= 0; i++) {
+      const k = L.dayKey(L.addDays(now, i));
+      S.gut[k] = i === 0 ? { stools: 2, type: 'molle' } : { stools: 2 + (-i % 3), type: -i % 3 === 2 ? 'liquide' : 'molle', pain: -i % 4 === 1 ? 1 : 0, energy: -i % 3 === 0 ? 1 : 0, night: i === -4 };
+    }
     FOODS.forEach((f, i) => L.setStock(S.stock, f.id, i % 5 === 3 ? 'out' : i % 5 === 1 ? 'low' : 'ok'));
+    check = { code: '3017620422003', r: L.productCheck({ product_name: 'Pâte à tartiner', brands: 'Exemple', additives_tags: ['en:e322'], allergens_tags: ['en:milk'], nova_group: 4 }) };
     S.water[today()] = 3;
     for (const m of S.meals) mem.meals.set(m.id, m);
   }

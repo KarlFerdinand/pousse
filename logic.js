@@ -1,7 +1,7 @@
 /* Pousse : règles pures (points, série, stock, courses). Sans accès à l'écran. */
 (function (root) {
   const DATA = (typeof module !== 'undefined' && module.exports) ? require('./data.js') : root.DATA;
-  const { MOMENTS, FOODS, AVOID, LEVELS, WATER_GOAL } = DATA;
+  const { MOMENTS, EXTRA, FEELINGS, FOODS, AVOID, ADDITIVES, ALLERGENS, STOOLS, PAIN, ENERGY, RECIPES, LEVELS, WATER_GOAL } = DATA;
 
   const pad = n => String(n).padStart(2, '0');
   const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -58,11 +58,15 @@
     return out;
   };
 
-  function totalPoints(meals, water) {
+  // Noter son ventre rapporte 5 points par jour, quel que soit ce qui est noté
+  const gutNoted = g => !!g && (g.stools != null || g.pain != null || g.energy != null || !!g.blood);
+
+  function totalPoints(meals, water, gut) {
     const days = new Set(meals.map(m => m.day));
     let total = 0;
     days.forEach(d => { Object.values(firstByMoment(meals, d)).forEach(m => { total += mealPoints(m); }); });
     Object.values(water || {}).forEach(n => { if (n >= WATER_GOAL) total += 10; });
+    Object.values(gut || {}).forEach(g => { if (gutNoted(g)) total += 5; });
     return total;
   }
 
@@ -156,9 +160,90 @@
 
   function mondayOf(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return addDays(x, -((x.getDay() + 6) % 7)); }
 
+  // Repas habituels : les descriptions les plus fréquentes des 30 derniers jours, pour noter en un geste
+  function favorites(meals, now, max) {
+    const since = new Date(now).getTime() - 30 * 86400000;
+    const by = new Map();
+    meals.filter(m => m.ts >= since && (m.text || '').trim()).sort((a, b) => a.ts - b.ts).forEach(m => {
+      const k = norm(m.text).replace(/\s+/g, ' ').trim();
+      const cur = by.get(k) || { n: 0 };
+      by.set(k, { n: cur.n + 1, text: m.text.trim(), foods: m.foods || [], last: m.ts });
+    });
+    return [...by.values()].sort((a, b) => b.n - a.n || b.last - a.last).slice(0, max || 4);
+  }
+
+  // Lecture d'une fiche Open Food Facts : additifs et allergènes qui irritent souvent l'intestin
+  function productCheck(p) {
+    if (!p) return null;
+    const additives = [...new Set((p.additives_tags || []).filter(t => ADDITIVES[t]).map(t => ADDITIVES[t]))];
+    const allergens = [...new Set((p.allergens_tags || []).filter(t => ALLERGENS[t]).map(t => ALLERGENS[t]))];
+    const ultra = Number(p.nova_group) === 4;
+    return { name: p.product_name_fr || p.product_name || 'Produit sans nom', brand: p.brands || '',
+      additives, allergens, ultra, calm: !additives.length && !allergens.length && !ultra };
+  }
+
+  // Recettes faisables avec ce qu'il y a
+  const recipesFor = stock => RECIPES.filter(r => r.needs.every(id => available(stock, id)));
+
+  // Bilan à partager avec l'équipe de soin. Que des faits notés, aucune note ni objectif.
+  function report(meals, gut, water, end, days) {
+    const n = days || 14;
+    const last = new Date(end); last.setHours(0, 0, 0, 0);
+    const first = addDays(last, -(n - 1));
+    const keys = [...Array(n)].map((_, i) => dayKey(addDays(first, i)));
+    const set = new Set(keys);
+    const gs = keys.map(k => (gut || {})[k]).filter(gutNoted);
+    const fr = d => d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
+    const lines = [`Suivi Pousse du ${fr(first)} au ${fr(last)} (${n} jours)`, ''];
+    lines.push('VENTRE');
+    if (!gs.length) lines.push('- Rien de noté sur la période');
+    else {
+      const st = gs.filter(g => g.stools != null).map(g => g.stools);
+      if (st.length) lines.push(`- Selles par jour : ${Math.min(...st)} à ${Math.max(...st)}, ${(st.reduce((a, b) => a + b, 0) / st.length).toFixed(1).replace('.', ',')} en moyenne (${st.length} jour${st.length > 1 ? 's' : ''} noté${st.length > 1 ? 's' : ''})`);
+      STOOLS.forEach(s => { const c = gs.filter(g => g.type === s.id).length; if (c) lines.push(`- ${s.label} : ${c} jour${c > 1 ? 's' : ''}`); });
+      const night = gs.filter(g => g.night).length; if (night) lines.push(`- Selles la nuit : ${night} jour${night > 1 ? 's' : ''}`);
+      const blood = keys.filter(k => ((gut || {})[k] || {}).blood); if (blood.length) lines.push(`- Sang noté : ${blood.map(k => fr(new Date(k + 'T12:00:00'))).join(', ')}`);
+      PAIN.forEach((l, i) => { if (!i) return; const c = gs.filter(g => g.pain === i).length; if (c) lines.push(`- Douleur ${l.toLowerCase()} : ${c} jour${c > 1 ? 's' : ''}`); });
+      const low = gs.filter(g => g.energy === 2).length; if (low) lines.push(`- Énergie faible : ${low} jour${low > 1 ? 's' : ''}`);
+    }
+    const ms = meals.filter(m => set.has(m.day));
+    lines.push('', 'REPAS');
+    const counts = keys.map(k => dayCount(meals, k)).filter(c => c > 0);
+    lines.push(counts.length ? `- Moments notés : ${counts.length} jours sur ${n}` : '- Aucun repas noté');
+    const durs = ms.filter(m => m.duration > 0).map(m => m.duration);
+    if (durs.length) lines.push(`- Durée des repas : ${Math.round(durs.reduce((a, b) => a + b, 0) / durs.length)} minutes en moyenne (${durs.length} repas chronométrés)`);
+    const extra = ms.filter(m => m.moment === EXTRA.id).length; if (extra) lines.push(`- Moments hors repas : ${extra}`);
+    const feel = {}; ms.forEach(m => { if (m.feel) feel[m.feel] = (feel[m.feel] || 0) + 1; });
+    const fl = Object.entries(feel).sort((a, b) => b[1] - a[1]).map(([id, c]) => `${(FEELINGS.find(f => f.id === id) || {}).label} ${c}`);
+    if (fl.length) lines.push(`- Ressentis avant de manger : ${fl.join(', ')}`);
+    const irr = {}; ms.forEach(m => (detect(m.text).avoid || []).forEach(w => { irr[w] = (irr[w] || 0) + 1; }));
+    const il = Object.entries(irr).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([w, c]) => `${w} ${c}`);
+    if (il.length) lines.push(`- Aliments souvent irritants mentionnés : ${il.join(', ')}`);
+    const w = keys.map(k => (water || {})[k]).filter(v => v > 0);
+    if (w.length) lines.push(`- Eau : ${(w.reduce((a, b) => a + b, 0) / w.length).toFixed(1).replace('.', ',')} verres par jour en moyenne (${w.length} jour${w.length > 1 ? 's' : ''} noté${w.length > 1 ? 's' : ''})`);
+    const notes = keys.map(k => ((gut || {})[k] || {}).note ? `- ${fr(new Date(k + 'T12:00:00'))} : ${gut[k].note}` : null).filter(Boolean);
+    if (notes.length) lines.push('', 'NOTES', ...notes);
+    return lines.join('\n');
+  }
+
   function buildVisionPrompt() {
     const list = FOODS.map(f => `${f.id} = ${f.name}`).join(', ');
     return `Voici une photo de réfrigérateur ou de placard. Parmi cette liste, indique uniquement les produits que tu vois clairement : ${list}. Réponds seulement avec un tableau JSON des identifiants, par exemple ["riz","carotte"].`;
+  }
+
+  // Photo d'une assiette : quels produits de la liste on voit. Jamais de calories ni de quantités.
+  function buildPlatePrompt() {
+    const list = FOODS.map(f => `${f.id} = ${f.name}`).join(', ');
+    return `Voici la photo d'un plat. Parmi cette liste, indique les produits que tu reconnais : ${list}. Ne donne ni calories ni quantités. Réponds seulement avec un objet JSON : {"foods":["riz"],"description":"riz, carottes et poulet"}, la description en quelques mots simples en français.`;
+  }
+
+  function parsePlate(text) {
+    const m = String(text).match(/\{[\s\S]*\}/);
+    if (!m) return { foods: parseVision(text), description: '' };
+    try {
+      const j = JSON.parse(m[0]);
+      return { foods: (j.foods || []).filter(id => FOODS.some(f => f.id === id)), description: String(j.description || '').slice(0, 120) };
+    } catch (e) { return { foods: [], description: '' }; }
   }
 
   function parseVision(text) {
@@ -168,7 +253,8 @@
   }
 
   const LOGIC = { dayKey, addDays, norm, detect, plateParts, isComplete, onTime, mealPoints, firstByMoment, totalPoints,
-    dayCount, streak, level, currentMoment, useFoods, setStock, available, suggest, shopping, buildVisionPrompt, parseVision, weekStats, mondayOf };
+    dayCount, streak, level, currentMoment, useFoods, setStock, available, suggest, shopping, buildVisionPrompt, parseVision, weekStats, mondayOf,
+    gutNoted, favorites, productCheck, recipesFor, report, buildPlatePrompt, parsePlate };
   if (typeof module !== 'undefined' && module.exports) module.exports = LOGIC;
   else root.LOGIC = LOGIC;
 })(this);

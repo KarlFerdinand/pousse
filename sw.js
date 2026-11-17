@@ -1,5 +1,5 @@
 // Pousse : fonctionne hors ligne. Change VERSION à chaque mise à jour des fichiers.
-const VERSION = 'pousse-v1';
+const VERSION = 'pousse-v2';
 const FILES = ['./', 'index.html', 'style.css', 'data.js', 'logic.js', 'app.js', 'manifest.webmanifest',
   'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
